@@ -1,0 +1,6 @@
+Use keras or tensorflow for networks.
+
+1. REINFORCE
+2. Deep-Q
+
+class Learner

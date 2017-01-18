@@ -21,60 +21,6 @@ class Episode():
         d = discount ** np.arange(1, len(R) + 1)
         return np.sum(R * d)
 
-
-# Not sure that we really need this...
-# class Environment():
-#     """Wrapper class for OpenAI Gym environments with convenience methods."""
-#     def __init__(self, name, env):
-#         self.name = name
-#         self.env = env  # gym.Env
-#         self.env.reset()  # make sure it's reset!
-#
-#     def run_episode(self, actions=None):
-#         episode = Episode()
-#         done = False
-#         episode.states.append(env.state)
-#         while not done:
-#             if actions == None:
-#                 a = self.env.action_space.sample()
-#             else:
-#                 a = actions(self.env.state).sample()  # pi(s, theta)
-#             s, r, done, info = self.env.step(a)
-#             episode.actions.append(a)
-#             episode.rewards.append(r)
-#             if not done:
-#                 episode.states.append(s)
-#         self.env.reset()
-#         return episode
-#
-# ... or this...
-# class Network():
-#     """
-#     Neural network specific to policy and value gradient algorithms.
-#
-#     A wrapper for a collection of TensorFlow operations. You should first
-#     define the operations describing the architecture of the network, then
-#     initialize the network from these operations.
-#
-#     """
-#     def __init__(self, inference, loss, train_op, eval_op):
-#         # self.sess = tf.Session()
-#         self.features_pl = None
-#         self.labels_pl = None
-#         self.inference = None
-#         self.loss = None
-#         self.train_op = None
-#         self.eval_op = None
-#
-#     def __repr__(self):
-#         pass
-#
-#     def logits(self):
-#         return self.inference(features_pl, dropout=True)
-#
-#     def predictions(self):
-#         return self.inference(features_pl, dropout=False)
-
 class Learner():
     """Combines model and environment to implement training."""
 
@@ -93,7 +39,6 @@ class Learner():
 
     def train(self):
         pass
-
 
 class Reinforce(Learner):
 

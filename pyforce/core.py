@@ -5,50 +5,48 @@ import gym
 
 # NOTE:
 
-# TODO:
+# TODO: summaries and checkpoints.
+# TODO: batch version of updates, using tf.multiply and tf.reduce_mean for loss...
 
-NN = 512
-NUM_FEATS = 4
-NUM_ACTIONS = 2
-MAX_EPISODES = 500
-LEARNING_RATE = 0.0001
-DECAY_STEPS = 1000
-DECAY_FACTOR = 0.90
+def fc_activation(layers, features, keep_prob):
+    """
+    Returns probability of each action.
 
-def placeholders():
-    num_features = 4
-    num_actions = 2
-    state_pl = tf.placeholder(tf.float32, shape=(1, num_features))
-    action_pl = tf.placeholder(tf.int32, shape=(num_actions, 1))
-    gain_pl = tf.placeholder(tf.float32, shape=())
-    prob_pl = tf.placeholder(tf.float32, shape=())
-    return state_pl, action_pl, gain_pl, prob_pl
+    layers (list): [num_features, nn1, nn2, ..., num_classes]
 
-def activation(features, keep_prob):
-    """Returns probability of each action."""
-    nn = NN
-    num_features = NUM_FEATS
-    num_actions = NUM_ACTIONS
-    with tf.name_scope('full'):
-        sd = 1.0 / np.sqrt(float(num_features))
-        weights = tf.Variable(tf.truncated_normal([num_features, nn], stddev=sd), name='weights')
-        bias = tf.Variable(tf.constant(0.1, shape=[nn]), name='bias')
-        full =  tf.nn.dropout(tf.nn.relu(tf.matmul(features, weights) + bias), keep_prob)
+    """
+
+    num_layers = len(layers)
+    full = features
+    for i in range(1, num_layers - 1):
+        with tf.name_scope('full'):
+            sd = 1.0 / np.sqrt(float(layers[i - 1]))
+            weights = tf.Variable(tf.truncated_normal([layers[i - 1], layers[i]], stddev=sd), name='weights')
+            bias = tf.Variable(tf.constant(0.1, shape=[layers[i]]), name='bias')
+            full =  tf.nn.dropout(tf.nn.relu(tf.matmul(full, weights) + bias), keep_prob)
     with tf.name_scope('softmax'):
-        sd = 1.0 / np.sqrt(float(nn))
-        weights = tf.Variable(tf.truncated_normal([nn, num_actions], stddev=sd), name='weights')
-        bias = tf.Variable(tf.constant(0.0, shape=[num_actions]), name='bias')
+        sd = 1.0 / np.sqrt(float(layers[-2]))
+        weights = tf.Variable(tf.truncated_normal([layers[-2], layers[-1]], stddev=sd), name='weights')
+        bias = tf.Variable(tf.constant(0.0, shape=[layers[-1]]), name='bias')
         logits =  tf.matmul(full, weights) + bias
     return logits
 
-def eligibility(logits, action, gain):
-    eligibility = tf.log(tf.matmul(tf.nn.softmax(logits), tf.cast(action, tf.float32)))
+def cnn_activation():
+    pass
+
+def rnn_activation():
+    pass
+
+def reinforce_loss(logits, action, gain):
+    p = tf.nn.softmax(logits)
+    a = tf.cast(action, tf.float32)
+    eligibility = tf.log(tf.reduce_mean(tf.multiply(p, a)))
     loss = - gain * eligibility
-    # tf.summary.scalar('eligibility', eligibility)
+    # tf.summary.scaler('loss', loss)
     return loss
 
-def update(loss, lr, global_step, decay_steps, decay_factor):
-    """Peforms modified (RMSProp) REINFORCE update."""
+def reinforce_update(loss, lr, global_step, decay_steps, decay_factor):
+    """Defines REINFORCE update (cf. Sutton & Barto pg. ???)."""
     lr = tf.train.exponential_decay(lr, global_step, decay_steps, decay_factor)
     # tf.summary.scalar('learning_rate', lr)
     optimizer = tf.train.GradientDescentOptimizer(lr)
@@ -56,23 +54,63 @@ def update(loss, lr, global_step, decay_steps, decay_factor):
 
 class Network():
 
-    def __init__(self, actions, keep_prob):
+    """
+
+    network (dict): {'type': network_type, 'layers': layers_list}
+    learner (string): learner_type
+    actions (list): [0, ..., num_actions]
+
+    """
+
+    def __init__(self, network, learner, actions, learning_rate, decay_steps,
+                 decay_factor, keep_prob=1):
         self.actions = actions
+        self.layers = network['layers']
+        self.num_features = self.layers[0]
+        self.num_classes = self.layers[-1]
         self.keep_prob = keep_prob
+        self.learning_rate = learning_rate
+        self.decay_steps = decay_steps
+        self.decay_factor = decay_factor
         with tf.Graph().as_default():
             self.global_step = tf.Variable(0, trainable=False, name="global_step")
-            self.features_pl = tf.placeholder(tf.float32, shape=(1, 4))
-            self.action_pl = tf.placeholder(tf.float32, shape=(2, 1))
-            self.gain_pl = tf.placeholder(tf.float32, shape=())
+            self.features_pl = tf.placeholder(tf.float32, shape=(1, self.num_features))
+            self.action_pl = tf.placeholder(tf.float32, shape=(1, self.num_classes))
             self.prob_pl = tf.placeholder(tf.float32, shape=())
-            self.logits = activation(self.features_pl, self.prob_pl)
-            self.loss = eligibility(self.logits, self.action_pl, self.gain_pl)
-            self.train_op = update(self.loss, LEARNING_RATE, self.global_step, DECAY_STEPS, DECAY_FACTOR)
+            if learner == 'reinforce':
+                self.gain_pl = tf.placeholder(tf.float32, shape=())
+
+            if network['type'] == 'fc':
+                self.logits = fc_activation(self.layers, self.features_pl, self.prob_pl)
+            elif network['type'] == 'cnn':
+                pass
+                # self.logits = cnn_activation(self.features_pl, self.prob_pl)
+            elif network['type'] == 'rnn':
+                pass
+                # self.logits = rnn_activation(self.features_pl, self.prob_pl)
+            else:
+                print("ERROR: Unable to create a network. Network type {} type not recognized.".format(network['type']))
+
+            if learner == "reinforce":
+                self.loss = reinforce_loss(self.logits, self.action_pl, self.gain_pl)
+                self.train_op = reinforce_update(self.loss,
+                                                 self.learning_rate,
+                                                 self.global_step,
+                                                 self.decay_steps,
+                                                 self.decay_factor)
+            elif learner == "deepq":
+                pass
+                # self.loss = deepq_loss(self.logits, self.action_pl)
+                # self.train_op = deepq_update(self.loss, self.global_step)
+            elif learner == "trpo":
+                pass
+                # self.loss = trpo_loss(self.logits, self.action_pl)
+                # self.train_op = trpo_update(self.loss, self.global_step)
+            else:
+                print("ERROR: Unable to create a network. Learner type {} type not recognized.".format(learner))
+
             self.init_op = tf.global_variables_initializer()
             self.sess = tf.Session()
-            # self.summarizer = tf.summary.merge_all()
-            # self.saver = tf.train.Saver()
-            # self.writer = tf.summary.FileWriter(log_dir, self.sess.graph)
             self.sess.run(self.init_op)
 
     def __str__(self):
@@ -86,9 +124,9 @@ class Network():
 
     def evaluate(self, s, a=None):
         """Network evaluated at s, then (optionally) at a."""
-        # state_pl = self.placeholders['state_pl']
-        output = self.sess.run(self.logits, feed_dict={self.features_pl:s,
-                                                       self.prob_pl:self.keep_prob})
+        feed_dict = {self.features_pl:s.reshape((1, self.num_features)),
+                     self.prob_pl:self.keep_prob}
+        output = self.sess.run(self.logits, feed_dict=feed_dict)
         if a is None:
             return output
         else:
@@ -96,8 +134,8 @@ class Network():
             return output[0, a_idx]
 
     def train(self, s, a, g):
-        feed_dict = {self.features_pl:s,
-                     self.action_pl:a,
+        feed_dict = {self.features_pl:s.reshape(1, self.num_features),
+                     self.action_pl:a.reshape(1, self.num_classes),
                      self.gain_pl:g,
                      self.prob_pl:self.keep_prob}
         self.sess.run(self.train_op, feed_dict=feed_dict)
@@ -118,24 +156,28 @@ def gain(rewards, start=0, gamma=1.0):
     return np.sum(R * d)
 
 def progressBar(current, maximum, step_ratio=0.05):
-    check = current % int(maximum * step_ratio)
-    if check == 0:
-        stars = int(current / int(maximum * 0.05))
-        spaces = int(1 / step_ratio) - stars
-        if stars < int(1 / step_ratio):
-            bar = "Progress: " + "#" * stars + " " * spaces + " ({}/{})"
-            print(bar.format(current, maximum), end="\r")
-        else:
-            bar = "Progress: " + "#" * stars + " ({}/{}) - Done"
-            print(bar.format(current, maximum), end="\n")
+    try:
+        check = current % int(maximum * step_ratio)
+        if check == 0:
+            stars = int(current / int(maximum * 0.05))
+            spaces = int(1 / step_ratio) - stars
+            if stars < int(1 / step_ratio):
+                bar = "Progress: " + "#" * stars + " " * spaces + " ({}/{})"
+                print(bar.format(current, maximum), end="\r")
+            else:
+                bar = "Progress: " + "#" * stars + " ({}/{}) - Done"
+                print(bar.format(current, maximum), end="\n")
+    except:
+        print("Error: maximum * step_ratio is non-integer value.")
 
 class Learner():
     """Combines network and environment to implement training."""
 
-    def __init__(self, net, env, discount_rate, score):
+    def __init__(self, net, env, discount_rate, max_episodes, score):
         self.net = net  # a Keras model
         self.env = env  # a Gym environment
         self.discount_rate = discount_rate
+        self.max_episodes = max_episodes
         self.score = score
         self.scores = []
         self.states = []
@@ -159,8 +201,19 @@ class Learner():
 
 class Reinforce(Learner):
 
-    def __init__(self, net, env, discount_rate, score):
-        Learner.__init__(self, net, env, discount_rate, score)
+    """
+
+    Parameters
+    ----------
+    net (): a `pf.Network` object.
+    env (): a `gym.Environment` object.
+    discount (): the discount rate applied to rewards.
+    score (): optional function summarizing the rewards in an epoch.
+
+    """
+
+    def __init__(self, net, env, discount_rate, max_episodes, score=None):
+        Learner.__init__(self, net, env, discount_rate, max_episodes, score)
 
     def __str__(self):
         s = format(env).rstrip(" instance>") + ">"
@@ -195,8 +248,8 @@ class Reinforce(Learner):
         for t in np.arange(0, steps):
             s = self.states[t]
             a_idx = self.net.actions.index(self.actions[t])
-            a = np.zeros((len(self.net.actions), 1))
-            a[a_idx, 0] = 1
+            a = np.zeros((1, len(self.net.actions)))
+            a[0, a_idx] = 1
             g = gain(self.rewards, start=t, gamma=self.discount_rate) * self.discount_rate ** t
             self.net.train(s.reshape(1,4), a, g)
 
@@ -205,11 +258,11 @@ class Reinforce(Learner):
     def train(self):
         self.episodes = 0
         self.scores = []
-        progressBar(self.episodes, MAX_EPISODES)
-        while self.episodes < MAX_EPISODES:
+        progressBar(self.episodes, self.max_episodes)
+        while self.episodes < self.max_episodes:
             score = self.step()
             self.scores.append(score)
-            progressBar(self.episodes, MAX_EPISODES)
+            progressBar(self.episodes, self.max_episodes)
 
     def summary(self):
         if len(self.scores) > 0:
@@ -235,3 +288,4 @@ class Sarsa(Learner):
 
     def train(self):
         pass
+        

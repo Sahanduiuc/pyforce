@@ -68,11 +68,15 @@ def deepq_loss(logits, targets, actions):
     Args:
         logits: `Tensor` of shape (batch_size, num_classes).
         targets: `Tensor` of shape (batch_size, ).
+        actions: `Tensor` of shape (batch_size, num_classes).
     """
 
     actions = tf.cast(actions, tf.float32)
     logits = tf.reduce_sum(tf.multiply(logits, actions), axis=1)
-    mse = tf.reduce_mean(tf.square(targets - logits), axis=0)
+    errors = targets - logits
+    # clipped = tf.maximum( tf.minimum(errors, 1), -1)
+    mse = tf.reduce_mean( tf.square(errors) )
+    # mse = tf.reduce_mean( tf.square(clipped) )
     tf.summary.scalar('mse', mse)
     return mse
 
@@ -121,68 +125,13 @@ class Network():
         self.decay_steps = decay_steps
         self.decay_factor = decay_factor
         self.keep_prob = keep_prob
-
         self.type = network['type']
         self.layers = network['layers']
-        self.num_features = self.layers[0]
-        self.num_classes = self.layers[-1]
-
         self.graph = tf.Graph()
         if batch_size is not None:
             self.batch_size = batch_size
             if self.agent == 'reinforce':
                 assert self.batch_size == 1, "REINFORCE requires that batch_size == 1."
-
-        with self.graph.as_default():
-            self.global_step = tf.Variable(0, trainable=False, name="global_step")
-            self.features_pl = tf.placeholder(tf.float32, shape=(None, self.num_features))
-            self.action_pl = tf.placeholder(tf.float32, shape=(self.batch_size, self.num_classes))
-            self.prob_pl = tf.placeholder(tf.float32, shape=())
-            if agent == 'reinforce':
-                self.gain_pl = tf.placeholder(tf.float32, shape=())
-            if agent == 'deepq':
-                self.targets_pl = tf.placeholder(tf.float32, shape=(self.batch_size, ))
-
-            if network['type'] == 'fc':
-                self.logits = fc_activation(self.layers, self.features_pl, self.prob_pl)
-                if agent == 'deepq':
-                    self.targets = fc_activation(self.layers, self.features_pl, self.prob_pl, clone=True)
-            elif network['type'] == 'cnn':
-                pass
-                # self.logits = cnn_activation(self.features_pl, self.prob_pl)
-            elif network['type'] == 'rnn':
-                pass
-                # self.logits = rnn_activation(self.features_pl, self.prob_pl)
-            else:
-                print("ERROR: Unable to create a network. Network type {} type not recognized.".format(network['type']))
-
-            self.softmax = tf.nn.softmax(self.logits)
-
-            if agent == "reinforce":
-                self.loss = reinforce_loss(self.logits, self.action_pl, self.gain_pl)
-                self.train_op = reinforce_update(self.loss,
-                                                 self.learning_rate,
-                                                 self.global_step,
-                                                 self.decay_steps,
-                                                 self.decay_factor)
-            elif agent == "deepq":
-                self.clone_weights = clone_weights(self.graph)
-                self.loss = deepq_loss(self.logits, self.targets_pl, self.action_pl)
-                self.train_op = deepq_update(self.loss,
-                                             self.learning_rate,
-                                             self.global_step,
-                                             self.decay_steps,
-                                             self.decay_factor)
-            elif agent == "trpo":
-                pass
-                # self.loss = trpo_loss(self.logits, self.action_pl)
-                # self.train_op = trpo_update(self.loss, self.global_step)
-            else:
-                print("ERROR: Unable to create a network. Agent type {} type not recognized.".format(agent))
-
-            self.init_op = tf.global_variables_initializer()
-            self.sess = tf.Session()
-            self.sess.run(self.init_op)
 
     def __str__(self):
         return "Network()"
@@ -190,50 +139,148 @@ class Network():
     def __repr__(self):
         return "<pf.Network>"
 
+    def num_features(self):
+        return self.layers[0]
+
+    def num_classes(self):
+        return self.layers[-1]
+
+    def build(self):
+
+        """Build the network. This must be called before the network is used."""
+
+        with self.graph.as_default():
+
+            # Data
+            self.global_step = tf.Variable(0, trainable=False, name="global_step")
+            self.features_pl = tf.placeholder(tf.float32, shape=(None, self.num_features()))
+            self.actions_pl = tf.placeholder(tf.float32, shape=(None, self.num_classes()))
+            self.prob_pl = tf.placeholder(tf.float32, shape=())
+            if self.agent == 'reinforce':
+                self.gain_pl = tf.placeholder(tf.float32, shape=())
+            if self.agent == 'deepq':
+                self.targets_pl = tf.placeholder(tf.float32, shape=(None, ))
+            self.lr = tf.train.exponential_decay(self.learning_rate,
+                                                 self.global_step,
+                                                 self.decay_steps,
+                                                 self.decay_factor)
+
+            # Activation
+            if self.type == 'fc':
+                self.logits = fc_activation(self.layers, self.features_pl, self.prob_pl)
+                self.softmax = tf.nn.softmax(self.logits)
+                if self.agent == 'deepq':
+                    self.targets = fc_activation(self.layers, self.features_pl, self.prob_pl, clone=True)
+            elif self.type == 'cnn':
+                pass
+                # self.logits = cnn_activation(self.features_pl, self.prob_pl)
+            elif self.type == 'rnn':
+                pass
+                # self.logits = rnn_activation(self.features_pl, self.prob_pl)
+            else:
+                print("ERROR: Unable to create a network. Network type {} type not recognized.".format(network['type']))
+
+            # Training
+            if self.agent == "reinforce":
+                self.loss = reinforce_loss(self.logits, self.actions_pl, self.gain_pl)
+                self.train_op = reinforce_update(self.loss,
+                                                 self.learning_rate,
+                                                 self.global_step,
+                                                 self.decay_steps,
+                                                 self.decay_factor)
+            elif self.agent == "deepq":
+                self.clone_weights = clone_weights(self.graph)
+                self.loss = deepq_loss(self.logits, self.targets_pl, self.actions_pl)
+                self.train_op = deepq_update(self.loss,
+                                             self.learning_rate,
+                                             self.global_step,
+                                             self.decay_steps,
+                                             self.decay_factor)
+            elif self.agent == "trpo":
+                pass
+                # self.loss = trpo_loss(self.logits, self.actions_pl)
+                # self.train_op = trpo_update(self.loss, self.global_step)
+            else:
+                print("ERROR: Unable to create a network. Agent type {} type not recognized.".format(agent))
+
+            # Session
+            self.init_op = tf.global_variables_initializer()
+            self.sess = tf.Session()
+            self.sess.run(self.init_op)
+            self.clone() # start with same weights
+
     def close(self):
         self.sess.close()
 
     def evaluate(self, s, a=None, clone=False):
-        """Network evaluated at s, then (optionally) at a."""
-        # feed_dict = {self.features_pl:s.reshape((self.batch_size, self.num_features)),
-        #              self.prob_pl:self.keep_prob}
-        feed_dict = {self.features_pl:s.reshape((-1, self.num_features)),
-                     self.prob_pl:self.keep_prob}
+        """
+        Network evaluated at s, then (optionally) at a.
+
+        Args:
+            s: a `Tensor` of shape (batch_size, num_features).
+            a: an integer in the range (0, num_classes), or a list/array of integers in
+               the same range.
+        Returns:
+            output: if a is None, an `Array` of size (batch_size, num_classes). Else,
+                    an `Array` of size (batch_size, ).
+        """
+
+        feed_dict = {self.features_pl:s.reshape((-1, self.num_features())),
+                     self.prob_pl:1.00}
         if clone:
             output = self.sess.run(self.targets, feed_dict=feed_dict)
         else:
             output = self.sess.run(self.logits, feed_dict=feed_dict)
+
         if a is None:
             return output
         else:
-            a_idx = self.actions.index(a)
-            return output[0, a_idx]
+            shape = output.shape
+            if len(shape) == 1:
+                return output[a]
+            else:
+                return output[np.arange(0, shape[0]), a]
 
-    def update(self, states, actions, targets=None, gain=None):
+    def update(self, s, a, targets=None, gain=None):
+
+        """
+        Peforms a single training operation to update network parameters.
+
+        Args:
+            s: an array of shape (batch_size, num_features).
+            a: an array of shape (batch_size, num_classes).
+            targets: (for DeepQ) an array of shape (batch_size, ).
+            gain: (for REINFORCE) a float.
+
+        Returns:
+            None.
+        """
+
         if self.agent == 'reinforce':
-            feed_dict = {self.features_pl:states.reshape(1, self.num_features),
-                         self.action_pl:actions.reshape(1, self.num_classes),
+            feed_dict = {self.features_pl:states.reshape(1, self.num_features()),
+                         self.actions_pl:actions.reshape(1, self.num_classes),
                          self.gain_pl:gain,
                          self.prob_pl:self.keep_prob}
             self.sess.run(self.train_op, feed_dict=feed_dict)
         elif self.agent == 'deepq':
-            feed_dict = {self.features_pl:states.reshape(self.batch_size, self.num_features),
-                         self.action_pl:actions.reshape(self.batch_size, self.num_classes),
+            s = s.reshape(-1, self.num_features())
+            a = a.reshape(-1, self.num_classes())
+            assert s.shape[0] == a.shape[0], "Number of states and actions don't match."
+            assert s.shape[0] == targets.shape[0], "Number of states and targets don't match."
+            feed_dict = {self.features_pl:s,
+                         self.actions_pl:a,
                          self.targets_pl:targets,
                          self.prob_pl:self.keep_prob}
-            self.sess.run(self.train_op, feed_dict=feed_dict)
+            loss, _ = self.sess.run([self.loss, self.train_op], feed_dict=feed_dict)
+            return loss
 
     def choice(self, s):
         """Sample an action from probabilities given by forward pass of s."""
-        feed_dict = {self.features_pl:s.reshape((1, self.num_features)),
-                     self.prob_pl:self.keep_prob}
+        assert len(s.shape) == 1, "choice expected 1-dimensional input"
+        feed_dict = {self.features_pl:s,
+                     self.prob_pl:1.00}
         p = self.sess.run(self.softmax, feed_dict=feed_dict)
         return np.random.choice(self.actions, p=p.reshape(len(self.actions),))
-
-    def probabilities(self, s):
-        feed_dict = {self.features_pl:s.reshape((1, self.num_features)),
-                     self.prob_pl:self.keep_prob}
-        return self.sess.run(self.softmax, feed_dict=feed_dict)
 
     def clone(self):
         """Copy the model weights to clone."""
@@ -360,20 +407,34 @@ class Reinforce(Agent):
 
 class DeepQ(Agent):
 
-    def __init__(self, net, env, discount_rate, max_episodes, score,
-                 max_mem, seq_length, batch_size, gamma):
+    """
+        Implements a DQN learner as described in [].
+
+        In the value of epsilon in epsilon-greedy
+        action selection is according to the schedule:
+
+            epsilon(t) = (max - min) * decay_factor ** (t / decay_episodes),
+
+        where t is measured in episodes.
+
+    """
+
+    def __init__(self, net, env, discount_rate, max_episodes, score, min_mem,
+                 max_mem, seq_length, batch_size, print_epsidoes, decay_episodes,
+                 decay_factor, clone_steps, init_epsilon, min_epsilon):
         Agent.__init__(self, net, env, discount_rate, max_episodes, score)
-        # self.net_ = net
-        self.epsilon = 1.00
-        self.min_epsilon = 0.10
+        self.epsilon = init_epsilon
+        self.init_epsilon = init_epsilon
+        self.min_epsilon = min_epsilon
         self.memory = []
+        self.min_mem = min_mem
         self.max_mem = max_mem
         self.seq_length = seq_length
         self.batch_size = batch_size
-        self.gamma = gamma
-        self.decay_episodes = 100
-        self.decay_factor = 0.99
-        self.update_steps = 100
+        self.print_epsidoes = print_epsidoes
+        self.decay_episodes = decay_episodes
+        self.decay_factor = decay_factor
+        self.clone_steps = clone_steps
 
     def __str__(self):
         s = format(self.env).rstrip(" instance>") + ">"
@@ -383,10 +444,10 @@ class DeepQ(Agent):
         s = format(self.env).rstrip(" instance>") + ">"
         return "Deep-Q agent(environment={})".format(s)
 
-    def fill_memory(self):
+    def init_memory(self):
         """Stores transitions produced by random actions in memory."""
-        print("Filling memory...")
-        while len(self.memory) < self.max_mem:
+        print("Initializing memory / exploration...")
+        while len(self.memory) < self.min_mem:
             x = self.env.reset()
             s = [x] * self.seq_length
             done = False
@@ -396,97 +457,133 @@ class DeepQ(Agent):
                 s_ = s.copy()
                 s.pop(0)
                 s.append(x)
-                self.memory.append((np.array(s_.copy()),
+                self.memory.append((np.array(s_.copy()).reshape((1,-1)),
                                     a,
                                     r,
-                                    np.array(s.copy()),
+                                    np.array(s.copy()).reshape((1,-1)),
                                     done))
-                if len(self.memory) == self.max_mem:
+                if len(self.memory) == self.min_mem:
                     print("Done.")
                     break
 
-    def select_action(self, state):
+    def select_action(self, s):
         """
         Performs epsilon-greedy action selection.
+
+        Args:
+            s: array with shape (1, num_features).
 
         Returns:
             An integer between 0 and net.num_actions.
 
         """
+
+        assert len(s.shape) == 1, "Greedy action selection requires len(state) == 1."
+
         p = np.random.random()
         if p < self.epsilon:
             a = np.random.choice(self.net.actions)
         else:
-            a = np.argmax(self.net.evaluate(np.array(state)))
+            a = np.argmax(self.net.evaluate(np.array(s)))
         return a
 
-    def targets(self, batch):
-        # batch is [batch_size x 5]
-        targets = []
-        states_, actions, rewards, states, end_flags = batch
-        values = self.net.evaluate(states, clone=True)
-        for v, r, s, done in zip(values, rewards, states, end_flags):
-            if done:
-                targets.append(r)
-            else:
-                targets.append(r + self.gamma * np.max(v))
-        return np.array(targets)
+    def targets(self, states, rewards, end_flags):
 
-    def get_batch(self):
-        batch = []
-        idx = np.random.choice(range(0, self.max_mem), size=self.batch_size)
-        for i in idx:
-            batch.append(self.memory[i])
-        batch = np.array(batch)
-        s_ = np.array([s.ravel() for s in batch[:, 0]])
-        a = np.zeros((self.batch_size, self.net.num_classes))
-        a_idx = np.array([a for a in batch[:, 1]])
-        a[[np.arange(0, self.batch_size), a_idx]] = 1
-        r = np.array([r for r in batch[:, 2]])
-        s = np.array([s.ravel() for s in batch[:, 3]])
-        done = np.array([f for f in batch[:, 4]])
+        """
+            Compute the targets for Deep-Q updates.
+
+            Args:
+                r: array of shape (batch_size, )
+                s: array of shape (batch_size, num_features)
+                end_flags: array of shape (batch_size, ). Boolean values
+                           indicate the end of an episode was reached.
+
+            Returns:
+                targets: an array of shape (batch_size, ).
+        """
+
+        values = self.net.evaluate(states, clone=True)
+        targets = rewards + self.discount_rate * np.max(values, axis=1)
+        targets[end_flags==True] = rewards[end_flags==True]
+        return targets
+
+    def sample_memory(self, n):
+        idx = np.random.choice(range(0, len(self.memory)), size=n)
+        sample = np.array(self.memory)[idx, :]
+        return sample
+
+    def get_batch(self, mem):
+        idx = np.random.choice(range(0, len(mem)), size=self.batch_size)
+        batch = mem[idx,:]
+        s_ = np.concatenate(batch[:,0], axis=0)
+        a_idx = batch[:,1]
+        a = np.zeros((self.batch_size, self.net.num_classes()))
+        a[[np.arange(0, self.batch_size), a_idx.astype('int')]] = 1
+        r = batch[:,2]
+        s = np.concatenate(batch[:,3], axis=0)
+        done = batch[:,4]
         return s_, a, r, s, done
 
-    def run_episode(self):
+    def run_episode(self, total_steps=0):
         # Inner-loop of Algorithm 1.
         # NOTE: # paper uses s.extend([a, x]), but then doesn't use a... ?
 
         x = self.env.reset()
         s = [x] * self.seq_length
-        rewards = []
-        steps = 0
+        r_list = []
+        loss_list = []
         done = False
+        sample = self.sample_memory(self.batch_size * 100)
         while not done:
-            a = self.select_action(s)
+            a = self.select_action(np.array(s).reshape((-1)))
             x, r, done, info = self.env.step(a)
-            if r == 100:
-                print("The ship has landed!")
-            rewards.append(r)
+            # print("took a step")
+            r_list.append(r)
             s_ = s.copy()
             s.pop(0)
             s.append(x)
             if len(self.memory) == self.max_mem:
                 self.memory.pop(0)
-            obs = (np.array(s_.copy()), a, r, np.array(s.copy()), done)
-            self.memory.append(obs)
-            s_, a, _, _, _ = batch = self.get_batch()
-            y = self.targets(batch)
-            self.net.update(s_, a, targets=y)
-            steps += 1
-            if steps % self.update_steps == 0:
+            self.memory.append((np.array(s_.copy()).reshape((1,-1)),
+                                a,
+                                r,
+                                np.array(s.copy()).reshape((1,-1)),
+                                done))
+            # print("updated the memory bank")
+            states_, actions, rewards, states, end_flags = self.get_batch(sample)
+            # print("grabbed a batch of memories")
+            targets = self.targets(states, rewards, end_flags)
+            loss = self.net.update(states_, actions, targets=targets)
+            loss_list.append(loss)
+            # print("performed an update")
+            total_steps += 1
+            if total_steps % self.clone_steps == 0:
                 self.net.clone()
-                print("Updated the clone network.")
-        return self.score(rewards)
+                print("Updated the clone network (step={}).".format(total_steps))
+            if done:
+                if r == 100:
+                    print("The ship has landed!")
+                else:
+                    # print("The ship crashed...")
+                    pass
+        return np.mean(loss_list), self.score(r_list), total_steps
 
     def train(self):
         # Outer-loop of Algorithm 1.
+
         episodes = 0
-        ave_score = 0
-        self.fill_memory()
+        total_steps = 0
+        ave_score = 0  # over last print_epsidoes episodes
+        ave_loss = 0  # over last print_epsidoes episodes
+        self.init_memory()
         while episodes < self.max_episodes:
-            ave_score += self.run_episode()
+            loss, score, total_steps = self.run_episode(total_steps)
+            ave_loss += loss
+            ave_score += score
             episodes += 1
-            self.epsilon = (1.00 - self.min_epsilon) * self.decay_factor ** (episodes / self.decay_episodes)
-            if episodes % 10 == 0:
-                print("episode={:d}, ave_score={:.2f}, epsilon={:.2f}".format(episodes, ave_score / 10, self.epsilon))
+            self.epsilon = (self.init_epsilon - self.min_epsilon) * self.decay_factor ** (episodes / self.decay_episodes) + self.min_epsilon
+            if episodes % self.print_epsidoes == 0:
+                lr = self.net.sess.run(self.net.lr)
+                print("episode={:d}, lr={:.8f}, total_steps={:d}, ave_loss={:.2f}, ave_score={:.2f}, epsilon={:.2f}".format(episodes, lr, total_steps, ave_loss / self.print_epsidoes, ave_score / self.print_epsidoes, self.epsilon))
                 ave_score = 0
+                ave_loss = 0

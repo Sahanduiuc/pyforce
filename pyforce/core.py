@@ -3,12 +3,10 @@ import h5py as h5
 import numpy as np
 import gym
 
-# TODO: check that model and clone output are working (should give different evaluations).
-# TODO:
+# TODO: include raises errors in classes and class docstrings.
+# TODO: docstring for Agent.
 
-# TODO: summaries and checkpoints.
-# TODO: batch version of updates, using tf.multiply and tf.reduce_mean for loss...
-
+# Networks
 def fc_activation(layers, features, keep_prob, clone=False):
     """
 
@@ -50,9 +48,9 @@ def rnn_activation():
 def reinforce_loss(logits, action, gain):
     p = tf.nn.softmax(logits)
     a = tf.cast(action, tf.float32)
-    eligibility = tf.log(tf.reduce_sum(tf.multiply(p, a)))  # or reduce_mean?
+    eligibility = tf.log(tf.reduce_sum(tf.multiply(p, a)))
     loss = - (gain * eligibility)
-    tf.summary.scaler('loss', loss)
+    tf.summary.scalar('loss', loss)
     return loss
 
 def reinforce_update(loss, lr, global_step, decay_steps, decay_factor):
@@ -149,6 +147,7 @@ class Network():
 
         """Build the network. This must be called before the network is used."""
 
+        print("Building the network...")
         with self.graph.as_default():
 
             # Data
@@ -207,7 +206,9 @@ class Network():
             self.init_op = tf.global_variables_initializer()
             self.sess = tf.Session()
             self.sess.run(self.init_op)
-            self.clone() # start with same weights
+            if self.agent == "deepq":
+                self.clone()
+            print("Done.")
 
     def close(self):
         self.sess.close()
@@ -257,8 +258,8 @@ class Network():
         """
 
         if self.agent == 'reinforce':
-            feed_dict = {self.features_pl:states.reshape(1, self.num_features()),
-                         self.actions_pl:actions.reshape(1, self.num_classes),
+            feed_dict = {self.features_pl:s.reshape(1, self.num_features()),
+                         self.actions_pl:a.reshape(1, self.num_classes()),
                          self.gain_pl:gain,
                          self.prob_pl:self.keep_prob}
             self.sess.run(self.train_op, feed_dict=feed_dict)
@@ -277,7 +278,7 @@ class Network():
     def choice(self, s):
         """Sample an action from probabilities given by forward pass of s."""
         assert len(s.shape) == 1, "choice expected 1-dimensional input"
-        feed_dict = {self.features_pl:s,
+        feed_dict = {self.features_pl:s.reshape((-1, self.num_features())),
                      self.prob_pl:1.00}
         p = self.sess.run(self.softmax, feed_dict=feed_dict)
         return np.random.choice(self.actions, p=p.reshape(len(self.actions),))
@@ -286,6 +287,8 @@ class Network():
         """Copy the model weights to clone."""
         self.sess.run(self.clone_weights)
 
+
+# Agents
 def gain(rewards, start=0, gamma=1.0):
     R = rewards[start + 1:]
     d = gamma ** np.arange(0, len(R))
@@ -306,19 +309,19 @@ def progressBar(current, maximum, step_ratio=0.05):
     except:
         print("Error: maximum * step_ratio is non-integer value.")
 
+def exp_decay(t, factor, period, init_value, min_value=0.00):
+    return (init_value - min_value) * factor ** (t / period) + min_value
+
 class Agent():
     """Combines network and environment to implement training."""
 
-    def __init__(self, net, env, discount_rate, max_episodes, score):
-        self.net = net  # a Keras model
-        self.env = env  # a Gym environment
+    def __init__(self, net, env, discount_rate, max_episodes, print_episodes, score):
+        self.net = net
+        self.env = env
         self.discount_rate = discount_rate
         self.max_episodes = max_episodes
+        self.print_episodes = print_episodes
         self.score = score
-        self.scores = []
-        self.states = []
-        self.actions = []
-        self.rewards = []
         self.episodes = 0
 
     def __str__(self):
@@ -337,25 +340,35 @@ class Agent():
         """Outer-loop of learning algorithm."""
         pass
 
-    def evaluate(self):
-        """Evaluate the performance of the agent."""
-        pass
+    def evaluate(self, n=100):
+        print("Evaluating agent (n={:d})...".format(n))
+        scores = []
+        for _ in range(n):
+            scores.append(self.score(self.run_episode(train=False)))
+        mean = np.mean(scores)
+        stdev = np.std(scores)
+        minimum = np.min(scores)
+        maximum = np.max(scores)
+        packed = (mean, stdev, minimum, maximum)
+        print("mean={:.2f}, stdev={:.2f}, min={:.2f}, max={:.2f}.".format(*packed))
 
 class Reinforce(Agent):
 
     """
+    Args:
+        net: a `pf.Network`.
+        env: a `gym.Environment`.
+        discount_rate: discount rate used for value calculations, where the
+            value of a state is defined as the expected sum of discounted
+            rewards.
+        score: (optional) function calculating a score for each epoch.
 
-    Parameters
-    ----------
-    net (): a `pf.Network` object.
-    env (): a `gym.Environment` object.
-    discount (): the discount rate applied to rewards.
-    score (): optional function summarizing the rewards in an epoch.
-
+    Raises:
+        typeError: if net is not a `Network`, or env not a `gym.Environment`.
     """
 
-    def __init__(self, net, env, discount_rate, max_episodes, score=None):
-        Agent.__init__(self, net, env, discount_rate, max_episodes, score)
+    def __init__(self, net, env, discount_rate, max_episodes, print_episodes, score=None):
+        Agent.__init__(self, net, env, discount_rate, max_episodes, print_episodes, score)
 
     def __str__(self):
         s = format(env).rstrip(" instance>") + ">"
@@ -365,45 +378,54 @@ class Reinforce(Agent):
         s = format(env).rstrip(" instance>") + ">"
         return "REINFORCE agent(environment={})".format(s)
 
-    def run_episode(self):
-        """Perform one step of the learning algorithm (one episode for REINFORCE)."""
+    def run_episode(self, train=True):
+        """
+        Args:
 
-        # Generate an episode
-        self.states = []
-        self.actions = []
-        self.rewards = []
+
+        Returns:
+            rewards: a list containing the rewards earned during the episode.
+
+        """
+
+        states = []
+        actions = []
+        rewards = []
         s = self.env.reset()
         done = False
         steps = 0
         while not done:
-            self.states.append(s)
+            states.append(s)
             a = self.net.choice(s)
             s, r, done, info = self.env.step(a)
             steps += 1
-            self.actions.append(a)
-            self.rewards.append(r)
+            actions.append(a)
+            rewards.append(r)
             if done:
                 self.episodes += 1
 
-        # Perform REINFORCE updates
-        for t in np.arange(0, steps):
-            s = self.states[t]
-            a_idx = self.net.actions.index(self.actions[t])
-            a = np.zeros((1, len(self.net.actions)))
-            a[0, a_idx] = 1
-            g = gain(self.rewards, start=t, gamma=self.discount_rate) * self.discount_rate ** t
-            self.net.update(s, a, gain=g)
+        if train:
+            for t in np.arange(0, steps):
+                s = states[t]
+                a_idx = self.net.actions.index(actions[t])
+                a = np.zeros((1, len(self.net.actions)))
+                a[0, a_idx] = 1
+                g = gain(rewards, start=t, gamma=self.discount_rate) * self.discount_rate ** t
+                self.net.update(s, a, gain=g)
 
-        return self.score((self.rewards))
+        return rewards
 
     def train(self):
+        scores = []
         self.episodes = 0
-        self.scores = []
-        progressBar(self.episodes, self.max_episodes)
         while self.episodes < self.max_episodes:
-            score = self.run_episode()
-            self.scores.append(score)
-            progressBar(self.episodes, self.max_episodes)
+            rewards = self.run_episode()
+            scores.append(self.score(rewards))
+            if self.episodes % self.print_episodes == 0:
+                lr = self.net.sess.run(self.net.lr)
+                mean = np.mean(scores[-self.print_episodes:])
+                packed = (self.episodes, lr, mean)
+                print("episodes={:d}, lr ={:.6f}, score={:.2f}".format(*packed))
 
 class DeepQ(Agent):
 
@@ -416,13 +438,12 @@ class DeepQ(Agent):
             epsilon(t) = (max - min) * decay_factor ** (t / decay_episodes),
 
         where t is measured in episodes.
-
     """
 
-    def __init__(self, net, env, discount_rate, max_episodes, score, min_mem,
-                 max_mem, seq_length, batch_size, print_epsidoes, decay_episodes,
-                 decay_factor, clone_steps, init_epsilon, min_epsilon):
-        Agent.__init__(self, net, env, discount_rate, max_episodes, score)
+    def __init__(self, net, env, discount_rate, max_episodes, print_episodes, score, min_mem,
+                 max_mem, seq_length, batch_size, decay_episodes, decay_factor,
+                 clone_steps, init_epsilon, min_epsilon):
+        Agent.__init__(self, net, env, discount_rate, max_episodes, print_episodes, score)
         self.epsilon = init_epsilon
         self.init_epsilon = init_epsilon
         self.min_epsilon = min_epsilon
@@ -431,10 +452,12 @@ class DeepQ(Agent):
         self.max_mem = max_mem
         self.seq_length = seq_length
         self.batch_size = batch_size
-        self.print_epsidoes = print_epsidoes
+        self.print_episodes = print_episodes
         self.decay_episodes = decay_episodes
         self.decay_factor = decay_factor
         self.clone_steps = clone_steps
+        self.episodes = 0
+        self.steps = 0
 
     def __str__(self):
         s = format(self.env).rstrip(" instance>") + ">"
@@ -466,26 +489,25 @@ class DeepQ(Agent):
                     print("Done.")
                     break
 
-    def select_action(self, s):
+    def select_action(self, state):
         """
         Performs epsilon-greedy action selection.
 
         Args:
-            s: array with shape (1, num_features).
+            state: array with shape (1, num_features).
 
         Returns:
             An integer between 0 and net.num_actions.
 
         """
 
-        assert len(s.shape) == 1, "Greedy action selection requires len(state) == 1."
+        assert len(state.shape) == 1, "action selection requires len(state) = 1."
 
-        p = np.random.random()
-        if p < self.epsilon:
-            a = np.random.choice(self.net.actions)
+        if np.random.random() < self.epsilon:
+            action = np.random.choice(self.net.actions)
         else:
-            a = np.argmax(self.net.evaluate(np.array(s)))
-        return a
+            action = np.argmax(self.net.evaluate(np.array(state)))
+        return action
 
     def targets(self, states, rewards, end_flags):
 
@@ -512,9 +534,9 @@ class DeepQ(Agent):
         sample = np.array(self.memory)[idx, :]
         return sample
 
-    def get_batch(self, mem):
-        idx = np.random.choice(range(0, len(mem)), size=self.batch_size)
-        batch = mem[idx,:]
+    def get_batch(self, sample):
+        idx = np.random.choice(range(0, len(sample)), size=self.batch_size)
+        batch = sample[idx,:]
         s_ = np.concatenate(batch[:,0], axis=0)
         a_idx = batch[:,1]
         a = np.zeros((self.batch_size, self.net.num_classes()))
@@ -524,66 +546,57 @@ class DeepQ(Agent):
         done = batch[:,4]
         return s_, a, r, s, done
 
-    def run_episode(self, total_steps=0):
-        # Inner-loop of Algorithm 1.
-        # NOTE: # paper uses s.extend([a, x]), but then doesn't use a... ?
-
+    def run_episode(self, train=True):
+        """Inner-loop of Algorithm 1 [Mnih et al. 2015]"""
+        rewards = []
         x = self.env.reset()
         s = [x] * self.seq_length
-        r_list = []
-        loss_list = []
+        if train:
+            sample = self.sample_memory(self.batch_size * 100)
         done = False
-        sample = self.sample_memory(self.batch_size * 100)
+        steps = 0
         while not done:
             a = self.select_action(np.array(s).reshape((-1)))
             x, r, done, info = self.env.step(a)
-            # print("took a step")
-            r_list.append(r)
-            s_ = s.copy()
-            s.pop(0)
-            s.append(x)
-            if len(self.memory) == self.max_mem:
-                self.memory.pop(0)
-            self.memory.append((np.array(s_.copy()).reshape((1,-1)),
-                                a,
-                                r,
-                                np.array(s.copy()).reshape((1,-1)),
-                                done))
-            # print("updated the memory bank")
-            states_, actions, rewards, states, end_flags = self.get_batch(sample)
-            # print("grabbed a batch of memories")
-            targets = self.targets(states, rewards, end_flags)
-            loss = self.net.update(states_, actions, targets=targets)
-            loss_list.append(loss)
-            # print("performed an update")
-            total_steps += 1
-            if total_steps % self.clone_steps == 0:
-                self.net.clone()
-                print("Updated the clone network (step={}).".format(total_steps))
+            steps += 1
+            rewards.append(r)
             if done:
-                if r == 100:
-                    print("The ship has landed!")
-                else:
-                    # print("The ship crashed...")
-                    pass
-        return np.mean(loss_list), self.score(r_list), total_steps
+                self.episodes += 1
+            if train:
+                s_ = s.copy()
+                s.pop(0)
+                s.append(x)
+                if len(self.memory) == self.max_mem:
+                    self.memory.pop(0)
+                self.memory.append((np.array(s_.copy()).reshape((1,-1)),
+                                    a,
+                                    r,
+                                    np.array(s.copy()).reshape((1,-1)),
+                                    done))
+                states_, actions_, rewards_, states, end_flags = self.get_batch(sample)
+                targets = self.targets(states, rewards_, end_flags)
+                self.net.update(states_, actions_, targets=targets)
+                self.steps += 1
+                if self.steps % self.clone_steps == 0:
+                    self.net.clone()
+        return rewards
 
     def train(self):
-        # Outer-loop of Algorithm 1.
-
-        episodes = 0
-        total_steps = 0
-        ave_score = 0  # over last print_epsidoes episodes
-        ave_loss = 0  # over last print_epsidoes episodes
+        """Outer-loop of Algorithm 1 [Mnih et al. 2015]."""
+        scores = []
+        self.episodes = 0
+        self.steps = 0
         self.init_memory()
-        while episodes < self.max_episodes:
-            loss, score, total_steps = self.run_episode(total_steps)
-            ave_loss += loss
-            ave_score += score
-            episodes += 1
-            self.epsilon = (self.init_epsilon - self.min_epsilon) * self.decay_factor ** (episodes / self.decay_episodes) + self.min_epsilon
-            if episodes % self.print_epsidoes == 0:
+        while self.episodes < self.max_episodes:
+            rewards = self.run_episode()
+            scores.append(self.score(rewards))
+            self.epsilon = exp_decay(self.episodes,
+                                     self.decay_factor,
+                                     self.decay_episodes,
+                                     self.init_epsilon,
+                                     self.min_epsilon)
+            if self.episodes % self.print_episodes == 0:
                 lr = self.net.sess.run(self.net.lr)
-                print("episode={:d}, lr={:.8f}, total_steps={:d}, ave_loss={:.2f}, ave_score={:.2f}, epsilon={:.2f}".format(episodes, lr, total_steps, ave_loss / self.print_epsidoes, ave_score / self.print_epsidoes, self.epsilon))
-                ave_score = 0
-                ave_loss = 0
+                mean = np.mean(scores[-self.print_episodes:])
+                packed = (self.episodes, self.steps, lr, self.epsilon, mean)
+                print("episodes={:d}, steps={:d}, lr={:.6f}, eps={:.2f}, score={:.2f}".format(*packed))
